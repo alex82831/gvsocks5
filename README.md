@@ -11,7 +11,7 @@ Currently it only supports NO_AUTH method and USERNAME_PASSWORD method. Plan to 
 Socks5Server socks5Server = new Socks5Server();
 socks5Server.start();
 ```
-This will start a open socks5 proxy on port 1080.
+This will start an open socks5 proxy on port 1080.
 
 **How to setup a socks5 proxy with USERNAME_PASSWORD method enabled:**
 ```
@@ -21,7 +21,7 @@ socks5Server.start();
 ```
 This will initialize a socks5 proxy with username 'alex' and password '123123'
 
-**How to setup socks5 proxy with chainning to upstream socks5 proxy:**
+**How to setup socks5 proxy with chaining to upstream socks5 proxy:**
 ```
 Socks5Server socks5Server = new Socks5Server();
 socks5Server.setSocksChain("upstream.host", 1080);
@@ -34,6 +34,6 @@ setSocksChain(String upstreamHost, int upstreamPort, String username, String pas
 to connect to USERNAME_PASSWORD enabled upstream socks5 proxy.
 
 Some clients will send hostname instead of actual IP address to force resolve DNS record on server side. This is very useful if you are behind a firewall or in a DNS polluted env.
-We will use default DNS server for that work but you can use setDnsServer() to use your own.
+We will use default DNS server for that work, and you can use setDnsServer() to use your own.
 
 Please note that all set functions must be called before start()
