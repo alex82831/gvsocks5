@@ -214,8 +214,12 @@ public class Socks5Server {
     }
 
     private void socks5Handler(NetSocket socket, Buffer buffer) {
-        byte[] bytes = buffer.getBytes();
-        socks5CmdHandlers[bytes[1]].onCommand(socket, bytes);
+        if(buffer.length() <= socks5CmdHandlers.length) {
+            byte[] bytes = buffer.getBytes();
+            socks5CmdHandlers[bytes[1]].onCommand(socket, bytes);
+        } else {
+            sendError(socket, UNSUPPORTED_CMD);
+        }
     }
 
     private void sendError(NetSocket socket, byte error) {
