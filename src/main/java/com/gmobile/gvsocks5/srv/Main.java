@@ -1,15 +1,7 @@
 package com.gmobile.gvsocks5.srv;
 
 import com.gmobile.gvsocks5.srv.commons.CommandLineParser;
-import io.vertx.core.Vertx;
-import io.vertx.core.VertxOptions;
-import io.vertx.core.impl.Arguments;
-import io.vertx.core.net.ProxyOptions;
-import io.vertx.core.net.ProxyType;
 import io.vertx.core.net.SocketAddress;
-import io.vertx.ext.web.client.WebClient;
-import io.vertx.ext.web.client.WebClientOptions;
-import lombok.NonNull;
 
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
