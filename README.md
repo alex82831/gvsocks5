@@ -14,14 +14,14 @@ This will initialize a socks5 proxy listening on port 1080 and set username to '
 Please refer to source code for other useful options to control proxy behavior
 
 **How to start an open socks5 proxy with NO_AUTH method enabled:**
-```
+```java
 Socks5Server socks5Server = new Socks5Server();
 socks5Server.start();
 ```
 This will start an open socks5 proxy on port 1080.
 
 **How to start a socks5 proxy with USERNAME_PASSWORD method enabled:**
-```
+```java
 Socks5Server socks5Server = new Socks5Server();
 socks5Server.enableUsernamePasswordMethod("alex", "123123");
 socks5Server.start();
@@ -29,13 +29,13 @@ socks5Server.start();
 This will initialize a socks5 proxy and set username to 'alex' and password to '123123'
 
 **How to start socks5 proxy with chaining to upstream socks5 proxy:**
-```
+```java
 Socks5Server socks5Server = new Socks5Server();
 socks5Server.setSocksChain("upstream.host", 1080);
 socks5Server.start();
 ```
 This will initialize a socks5 proxy which will send request to upstream proxy instead of direct connecting. Also, you can use
-```
+```java
 setSocksChain(String upstreamHost, int upstreamPort, String username, String password)
 ```
 to connect to USERNAME_PASSWORD enabled upstream socks5 proxy.
