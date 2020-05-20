@@ -7,7 +7,6 @@ It's fast and very small you can embed it into your project with just 2 lines of
 Currently, it only supports NO_AUTH method and USERNAME_PASSWORD method. Plan to add more auth methods.
 
 **Run as a standalone application**
-Build JAR file and run as follows
 ```
 java -jar gvsocks.jar -p 1080 -username alex -password 123123
 ``` 
