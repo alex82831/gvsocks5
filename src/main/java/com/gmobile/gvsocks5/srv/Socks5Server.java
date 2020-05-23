@@ -11,17 +11,20 @@ import io.vertx.core.impl.Arguments;
 import io.vertx.core.logging.Logger;
 import io.vertx.core.logging.LoggerFactory;
 import io.vertx.core.net.*;
-import io.vertx.core.streams.Pump;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.Setter;
 import org.apache.commons.codec.DecoderException;
 import org.apache.commons.codec.binary.Hex;
 import org.apache.commons.lang3.RandomUtils;
+import org.ietf.jgss.*;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
+import java.util.Objects;
+
+import static com.gmobile.gvsocks5.srv.GSSCryptoMethod.getGSSReply;
 
 @RequiredArgsConstructor
 public class Socks5Server {
@@ -29,14 +32,19 @@ public class Socks5Server {
     private static final Logger log = LoggerFactory.getLogger(Socks5Server.class);
 
     private final static int SOCKS_VERSION_5 = 0x05;
-    private final static int NO_AUTH_METHOD = 0x00;
-    private final static int USERNAME_PASSWORD_METHOD = 0x02;
+
     private final static int IPv4 = 0x01;
     private final static int IPv6 = 0x04;
-    private final static int HOSTNAME = 0x03;
+    private final static int DOMAIN = 0x03;
+
     private final static Buffer NO_SUPPORTED_METHODS = Buffer.buffer(new byte[]{SOCKS_VERSION_5, (byte) 0xff});
+
     private static final Buffer AUTH_SUCCESS = Buffer.buffer(new byte[]{1, 0});
     private static final Buffer AUTH_FAILED = Buffer.buffer(new byte[]{1, 1});
+
+    private final static int NO_AUTH_METHOD = 0x00;
+    private final static int USERNAME_PASSWORD_METHOD = 0x02;
+    private final static int GSSAPI_METHOD = 0x01;
 
     private static final byte SUCCESS = 0x00;
     private static final byte SOCKS5_SERVER_GENERAL_ERROR = 0x01;
@@ -47,8 +55,11 @@ public class Socks5Server {
     private static final byte TTL_EXPIRED = 0x06;
     private static final byte UNSUPPORTED_CMD = 0x07;
     private static final byte UNSUPPORTED_ADDRESS = 0x08;
+
     @Getter
     private final Vertx vertx = Vertx.vertx(new VertxOptions());
+    @Getter
+    private final GSSManager gssManager = GSSManager.getInstance();
     @Setter
     @Getter
     private SocketAddress bindAddress = SocketAddress.inetSocketAddress(1080, "0.0.0.0");
@@ -70,7 +81,22 @@ public class Socks5Server {
     private String upstreamSocks5ProxyPassword = "";
     private DnsClient dnsClient;
     private NetClient client;
-    private final SocksCommandHandler[] socks5CmdHandlers = {this::socks5Undefined, this::socks5Connect, this::socks5Bind, this::socks5UDP};
+    private final SocksCommandHandler[] socks5CmdHandlers = {
+            this::socks5Undefined,
+            this::socks5Connect,
+            this::socks5Bind,
+            this::socks5UDP
+    };
+    @Getter
+    private GSSContext gssContext;
+    private final Map<Integer, Socks5AuthMethod> methods = Map.of(
+            NO_AUTH_METHOD, this::noAuth,
+            USERNAME_PASSWORD_METHOD, this::usernamePasswordAuth,
+            GSSAPI_METHOD, this::gssAPIMethod
+    );
+    @Setter
+    @Getter
+    private GSSCredential gssCredential;
 
     public void enableUsernamePasswordMethod(String username, String password) {
         this.username = username;
@@ -110,9 +136,19 @@ public class Socks5Server {
         }
     }
 
+    private void initGSSContext() {
+        try {
+            gssContext = gssManager.createContext(gssCredential);
+        } catch (GSSException e) {
+            log.debug(e.getMessage(), e);
+            log.info("GSSContext init failed.");
+        }
+    }
+
     public void start() {
         initTcpClient();
         initDNSClient();
+        initGSSContext();
         NetServerOptions options = new NetServerOptions();
         options.setPort(bindAddress.port());
         int num = Runtime.getRuntime().availableProcessors();
@@ -159,20 +195,19 @@ public class Socks5Server {
         byte atyp;
         if (host.contains(".")) atyp = IPv4;
         else if (host.contains(":")) atyp = IPv6;
-        else atyp = HOSTNAME;
+        else atyp = DOMAIN;
         return atyp;
     }
 
     private void socks5Connection(NetSocket socket, byte[] bytes) {
-        Set<Integer> supportedMethods = Set.of(NO_AUTH_METHOD, USERNAME_PASSWORD_METHOD);
         int countOfMethods = bytes[1];
         if (bytes.length != 2 + countOfMethods) {
             socket.close();
         } else {
             boolean supported = false;
             for (int i = 2; i < bytes.length; i++) {
-                if (supportedMethods.contains((int) bytes[i])) {
-                    if (bytes[i] == NO_AUTH_METHOD && !username.isEmpty() && !password.isEmpty()) continue;
+                if (methods.containsKey((int) bytes[i])) {
+                    Socks5AuthMethod method = methods.get((int) bytes[i]);
                     Buffer reply = Buffer.buffer(new byte[]{SOCKS_VERSION_5, bytes[i]});
                     socket.write(reply, ar -> {
                         if (!ar.succeeded()) {
@@ -180,27 +215,8 @@ public class Socks5Server {
                             log.debug(ar.cause().getMessage(), ar.cause());
                         }
                     });
-                    if (bytes[i] == USERNAME_PASSWORD_METHOD) {
-                        socket.handler(buf -> {
-                            Buffer authReply = Buffer.buffer(new byte[]{1, (byte) username.length()});
-                            authReply.appendString(username);
-                            authReply.appendByte((byte) password.length());
-                            authReply.appendString(password);
-                            if (!buf.equals(authReply)) {
-                                socket.handler(null);
-                                socket.write(AUTH_FAILED, ar -> {
-                                    if (!ar.succeeded()) log.info(ar.cause().getMessage(), ar.cause());
-                                    socket.close();
-                                });
-                                log.info("AUTH failed - username/password mismatch");
-                            } else {
-                                socket.write(AUTH_SUCCESS);
-                                socket.handler(buffer -> socks5Handler(socket, buffer));
-                            }
-                        });
-                    } else socket.handler(buffer -> socks5Handler(socket, buffer));
+                    method.onAuth(socket, cryptoMethod -> socket.handler(buffer -> socks5Handler(socket, buffer, cryptoMethod)), () -> log.info("AUTH failed"));
                     supported = true;
-                    break;
                 }
             }
             if (!supported) {
@@ -213,10 +229,90 @@ public class Socks5Server {
         }
     }
 
-    private void socks5Handler(NetSocket socket, Buffer buffer) {
+    private void noAuth(NetSocket socket, AuthSuccessCallback successCallback, Runnable failedCallback) {
+        Objects.requireNonNull(successCallback);
+        successCallback.onAuthSuccess(new DoNothingCryptoMethod());
+    }
+
+    private void usernamePasswordAuth(NetSocket socket, AuthSuccessCallback successCallback, Runnable failedCallback) {
+        Objects.requireNonNull(successCallback);
+        Objects.requireNonNull(failedCallback);
+        socket.handler(buf -> {
+            Buffer authReply = Buffer.buffer(new byte[]{1, (byte) username.length()});
+            authReply.appendString(username);
+            authReply.appendByte((byte) password.length());
+            authReply.appendString(password);
+            if (!buf.equals(authReply)) {
+                socket.handler(null);
+                socket.write(AUTH_FAILED, ar -> {
+                    if (!ar.succeeded()) log.info(ar.cause().getMessage(), ar.cause());
+                });
+                failedCallback.run();
+            } else {
+                socket.write(AUTH_SUCCESS, ar -> {
+                    if (!ar.succeeded()) log.info(ar.cause().getMessage(), ar.cause());
+                });
+                successCallback.onAuthSuccess(new DoNothingCryptoMethod());
+            }
+        });
+    }
+
+    private void gssAPIMethod(NetSocket socket, AuthSuccessCallback successCallback, Runnable failedCallback) {
+        Objects.requireNonNull(successCallback);
+        Objects.requireNonNull(failedCallback);
+        if (gssContext == null) failedCallback.run();
+        else {
+            socket.fetch(4);
+            socket.handler(buffer -> {
+                byte[] bytes = buffer.getBytes();
+                if (bytes[0] != 0x01 || bytes[1] != 0x01) {
+                    failedCallback.run();
+                } else {
+                    int len = ((bytes[2] & 0xFF) << 8 | (bytes[3] & 0xFF));
+                    socket.fetch(len);
+                    socket.handler(clientTokenBuf -> {
+                        byte[] token;
+                        try {
+                            token = gssContext.acceptSecContext(clientTokenBuf.getBytes(), 0, len);
+                        } catch (GSSException e) {
+                            log.info(e.getMessage(), e);
+                            socket.write(NO_SUPPORTED_METHODS);
+                            return;
+                        }
+                        byte[] reply = getGSSReply((byte)0x01, token);
+                        socket.write(Buffer.buffer(reply));
+                        if (!gssContext.isEstablished()) {
+                            gssAPIMethod(socket, successCallback, failedCallback);
+                        } else {
+                            gssProtectionLevelNegotiation(socket, successCallback, failedCallback);
+                        }
+                    });
+                }
+            });
+        }
+    }
+
+    private void gssProtectionLevelNegotiation(NetSocket socket, AuthSuccessCallback successCallback, Runnable failedCallback) {
+        socket.handler(buffer -> {
+            byte [] packet = buffer.getBytes();
+            if(packet[0] != 0x01 || packet[1] != 0x01) {
+                failedCallback.run();
+            } else {
+                int requiredLevel = packet[4];
+                int serverLevel = 2;
+                if (requiredLevel == 1) serverLevel = 1;
+                packet[4] = (byte) serverLevel;
+                socket.write(Buffer.buffer(packet));
+                MessageProp prop = new MessageProp(serverLevel == 2);
+                successCallback.onAuthSuccess(new GSSCryptoMethod(gssContext, prop));
+            }
+        });
+    }
+
+    private void socks5Handler(NetSocket socket, Buffer buffer, CryptoMethod cryptoMethod) {
         byte[] bytes = buffer.getBytes();
-        if(bytes.length > 1 && bytes[1] < socks5CmdHandlers.length) {
-            socks5CmdHandlers[bytes[1]].onCommand(socket, bytes);
+        if (bytes.length > 1 && bytes[1] < socks5CmdHandlers.length) {
+            socks5CmdHandlers[bytes[1]].onCommand(socket, bytes, cryptoMethod);
         } else {
             sendError(socket, UNSUPPORTED_CMD);
         }
@@ -231,37 +327,38 @@ public class Socks5Server {
         });
     }
 
-    private void socks5Undefined(NetSocket socket, byte[] bytes) {
+    private void socks5Undefined(NetSocket socket, byte[] bytes, CryptoMethod method) {
         sendError(socket, UNSUPPORTED_CMD);
     }
 
-    private void socks5Connect(NetSocket socket, byte[] bytes) {
-        lookupSocketAddress(bytes, bytes[3], address -> socks5Connect(socket, address), () -> sendError(socket, HOST_UNREACHABLE));
+    private void socks5Connect(NetSocket socket, byte[] bytes, CryptoMethod method) {
+        lookupSocketAddress(bytes, bytes[3], address -> socks5Connect(socket, address, method), () -> sendError(socket, HOST_UNREACHABLE));
     }
 
-    private void startTrafficForwarding(NetSocket socketToClient, NetSocket socketToRemote) {
+    private void startTrafficForwarding(NetSocket socketToClient, NetSocket socketToRemote, CryptoMethod method) {
+        CryptoPump p1 = new CryptoPump(socketToRemote, socketToClient, null, method);
+        CryptoPump p2 = new CryptoPump(socketToClient, socketToRemote, method, null);
         socketToRemote.closeHandler(v -> {
-            log.info("Close socket to remote");
             socketToClient.closeHandler(null);
             socketToClient.close();
-            log.info("Close socket to client");
+            p1.stop();
+            p2.stop();
         });
         socketToClient.closeHandler(v -> {
-            log.info("Close socket to client");
             socketToRemote.closeHandler(null);
             socketToRemote.close();
-            log.info("Close socket to remote");
+            p1.stop();
+            p2.stop();
         });
-        Pump.pump(socketToRemote, socketToClient).start();
-        Pump.pump(socketToClient, socketToRemote).start();
-        log.info("Socket forwarding started");
+        p1.start();
+        p2.start();
     }
 
-    private void sendSuccessAndBuildTrafficForwarding(NetSocket socketToClient, NetSocket socketToRemote) {
+    private void sendSuccessAndBuildTrafficForwarding(NetSocket socketToClient, NetSocket socketToRemote, CryptoMethod method) {
         byte[] reply = getReplyBytes(SUCCESS, SocketAddress.inetSocketAddress(socketToRemote.localAddress().port(), bindAddress.host()));
         socketToClient.write(Buffer.buffer(reply), ar -> {
             if (ar.succeeded()) {
-                startTrafficForwarding(socketToClient, socketToRemote);
+                startTrafficForwarding(socketToClient, socketToRemote, method);
             } else {
                 socketToRemote.close();
                 sendError(socketToClient, CONNECTION_REFUSED);
@@ -270,7 +367,7 @@ public class Socks5Server {
         });
     }
 
-    private void socks5Connect(NetSocket socket, SocketAddress address) {
+    private void socks5Connect(NetSocket socket, SocketAddress address, CryptoMethod method) {
         log.info("SOCKS5 - CONNECT");
         if (address.port() == 0) {
             sendError(socket, UNSUPPORTED_ADDRESS);
@@ -279,7 +376,7 @@ public class Socks5Server {
             client.connect(address, ar -> {
                 if (ar.succeeded()) {
                     NetSocket socketToRemote = ar.result();
-                    sendSuccessAndBuildTrafficForwarding(socket, socketToRemote);
+                    sendSuccessAndBuildTrafficForwarding(socket, socketToRemote, method);
                 } else {
                     log.debug(ar.cause().getMessage(), ar.cause());
                     sendError(socket, NETWORK_UNREACHABLE);
@@ -306,7 +403,7 @@ public class Socks5Server {
                 address = SocketAddress.inetSocketAddress(getPort(bytes[8], bytes[9]), host);
             }
             break;
-            case HOSTNAME: {
+            case DOMAIN: {
                 StringBuilder builder = new StringBuilder();
                 int i = 5;
                 int len = bytes[4];
@@ -352,8 +449,8 @@ public class Socks5Server {
         callback.onAddress(address);
     }
 
-    private void socks5Bind(NetSocket socket, byte[] bytes) {
-        lookupSocketAddress(bytes, bytes[3], address -> socks5Bind(socket, address), () -> sendError(socket, HOST_UNREACHABLE));
+    private void socks5Bind(NetSocket socket, byte[] bytes, CryptoMethod method) {
+        lookupSocketAddress(bytes, bytes[3], address -> socks5Bind(socket, address, method), () -> sendError(socket, HOST_UNREACHABLE));
     }
 
     private void writePort(byte[] bytes, int port) {
@@ -378,7 +475,7 @@ public class Socks5Server {
                 }
                 return bytes;
             }
-            case HOSTNAME: {
+            case DOMAIN: {
                 byte[] chars = host.getBytes(StandardCharsets.UTF_8);
                 byte[] bytes = new byte[1 + chars.length];
                 bytes[0] = (byte) chars.length;
@@ -397,7 +494,7 @@ public class Socks5Server {
             switch (type) {
                 case IPv4:
                 case IPv6:
-                case HOSTNAME:
+                case DOMAIN:
                     System.arraycopy(bytes, 4, hostBytes, 0, hostBytes.length);
                     break;
                 default:
@@ -410,7 +507,7 @@ public class Socks5Server {
         }
     }
 
-    private void socks5Bind(NetSocket socket, SocketAddress address) {
+    private void socks5Bind(NetSocket socket, SocketAddress address, CryptoMethod method) {
         log.info("SOCKS5 - BIND");
         if (address.port() == 0) {
             sendError(socket, SOCKS5_SERVER_GENERAL_ERROR);
@@ -420,7 +517,7 @@ public class Socks5Server {
                 if (ar.succeeded()) {
                     server.connectHandler(socketFromAppServer -> {
                         sendSuccess(socket, socketFromAppServer.remoteAddress());
-                        startTrafficForwarding(socket, socketFromAppServer);
+                        startTrafficForwarding(socket, socketFromAppServer, method);
                     });
                     sendSuccess(socket, bindAddress);
                 } else {
@@ -461,7 +558,7 @@ public class Socks5Server {
         lookupSocketAddress(packetData, type, address -> {
             int dataPos = 10;
             if (type == IPv6) dataPos = 22;
-            else if (type == HOSTNAME) dataPos = 7 + address.host().length();
+            else if (type == DOMAIN) dataPos = 7 + address.host().length();
             byte[] sentData = new byte[packetData.length - dataPos];
             System.arraycopy(sentData, 0, packetData, dataPos, sentData.length);
             Buffer buffer = Buffer.buffer(sentData);
@@ -470,7 +567,7 @@ public class Socks5Server {
         }, dnsErrorCallback);
     }
 
-    private void socks5UDP(NetSocket socket, byte[] bytes) {
+    private void socks5UDP(NetSocket socket, byte[] bytes, CryptoMethod method) {
         log.info("SOCKS5 - UDP");
         byte atyp = bytes[3];
         lookupSocketAddress(bytes, atyp, address -> findAvailablePort(lPort -> {
@@ -505,7 +602,7 @@ public class Socks5Server {
 
     @FunctionalInterface
     private interface SocksCommandHandler {
-        void onCommand(NetSocket socket, byte[] bytes);
+        void onCommand(NetSocket socket, byte[] bytes, CryptoMethod method);
     }
 
     @FunctionalInterface
@@ -516,5 +613,15 @@ public class Socks5Server {
     @FunctionalInterface
     private interface FindPortCallback {
         void onPort(int port);
+    }
+
+    @FunctionalInterface
+    private interface AuthSuccessCallback {
+        void onAuthSuccess(CryptoMethod cryptoMethod);
+    }
+
+    @FunctionalInterface
+    private interface Socks5AuthMethod {
+        void onAuth(NetSocket socket, AuthSuccessCallback successCallback, Runnable failedCallback);
     }
 }
