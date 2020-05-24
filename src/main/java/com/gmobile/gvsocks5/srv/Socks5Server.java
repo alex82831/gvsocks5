@@ -16,13 +16,12 @@ import lombok.RequiredArgsConstructor;
 import lombok.Setter;
 import org.apache.commons.codec.DecoderException;
 import org.apache.commons.codec.binary.Hex;
-import org.apache.commons.codec.digest.Crypt;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.codec.digest.HmacUtils;
-import org.apache.commons.crypto.Crypto;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.RandomUtils;
-import org.ietf.jgss.*;
+import org.apache.commons.lang3.StringUtils;
+import org.ietf.jgss.GSSManager;
 
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -93,7 +92,7 @@ public class Socks5Server {
 
     @Getter
     @Setter
-    private String chapSecret;
+    private String chapSecret = "";
 
     @Getter
     private final Map<Integer, Socks5AuthMethod> methods = new HashMap<>();
@@ -118,9 +117,16 @@ public class Socks5Server {
         if (password != null && !password.isEmpty()) upstreamSocks5ProxyPassword = password;
     }
 
+    private void addMethodIfAllNotEmpty(int method, Socks5AuthMethod authFunction, String ... parameters) {
+        for(String parameter : parameters) {
+            if(StringUtils.isEmpty(parameter)) return;
+        }
+        methods.put(method, authFunction);
+    }
+
     private void initAuthMethods() {
-        if(username != null && password != null) methods.put(USERNAME_PASSWORD_METHOD, this::usernamePasswordAuth);
-        if(chapSecret != null) methods.put(CHAP_METHOD, this::chapMethod);
+        addMethodIfAllNotEmpty(USERNAME_PASSWORD_METHOD, this::usernamePasswordAuth, username, password);
+        addMethodIfAllNotEmpty(CHAP_METHOD, this::chapMethod, chapSecret);
         if(methods.isEmpty()) methods.put(NO_AUTH_METHOD, this::noAuth);
     }
 
@@ -393,6 +399,8 @@ public class Socks5Server {
                     case PHRASE_2: {
                         if (userIdentifier == null || response == null) {
                             log.info("CHAP: Missing USER_IDENTITY or RESPONSE packet");
+                            chapHMACMD5Sockets.remove(socket);
+                            chapChallenges.remove(socket);
                             failedCallback.run();
                         } else {
                             if (chapChallenges.containsKey(socket)) {
@@ -438,15 +446,21 @@ public class Socks5Server {
                         break;
                     }
                     case PHRASE_3:{
+                        chapHMACMD5Sockets.remove(socket);
+                        chapChallenges.remove(socket);
                         successCallback.onAuthSuccess(new DoNothingCryptoMethod());
                         break;
                     }
                     case PHRASE_4:{
+                        chapHMACMD5Sockets.remove(socket);
+                        chapChallenges.remove(socket);
                         failedCallback.run();
                         break;
                     }
                     case PHRASE_KNOWNN:
                         log.info("CHAP: Missing or unsupported socks5 CHAP packet type OR internal socks5 server error");
+                        chapHMACMD5Sockets.remove(socket);
+                        chapChallenges.remove(socket);
                         failedCallback.run();
                         break;
                 }
