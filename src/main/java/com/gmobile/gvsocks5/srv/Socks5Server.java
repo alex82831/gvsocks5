@@ -595,7 +595,7 @@ public class Socks5Server {
             log.info("Target Address: " + address);
             if(proxyProvider != null) {
                 NetClientOptions options = new NetClientOptions();
-                options.setProxyOptions(proxyProvider.getProxyOptions(address));
+                options.setProxyOptions(proxyProvider.getProxyOptions(socket.remoteAddress()));
                 NetClient theClient = vertx.createNetClient(options);
                 theClient.connect(address, ar -> {
                     if (ar.succeeded()) {
