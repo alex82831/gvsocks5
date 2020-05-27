@@ -23,6 +23,7 @@ import org.apache.commons.lang3.RandomUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.ietf.jgss.GSSManager;
 
+import java.net.ProxySelector;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
@@ -93,6 +94,10 @@ public class Socks5Server {
     @Getter
     @Setter
     private String chapSecret = "";
+
+    @Getter
+    @Setter
+    private ProxyProvider proxyProvider = null;
 
     @Getter
     private final Map<Integer, Socks5AuthMethod> methods = new HashMap<>();
@@ -588,15 +593,30 @@ public class Socks5Server {
             sendError(socket, UNSUPPORTED_ADDRESS, method);
         } else {
             log.info("Target Address: " + address);
-            client.connect(address, ar -> {
-                if (ar.succeeded()) {
-                    NetSocket socketToRemote = ar.result();
-                    sendSuccessAndBuildTrafficForwarding(socket, socketToRemote, method);
-                } else {
-                    log.debug(ar.cause().getMessage(), ar.cause());
-                    sendError(socket, NETWORK_UNREACHABLE, method);
-                }
-            });
+            if(proxyProvider != null) {
+                NetClientOptions options = new NetClientOptions();
+                options.setProxyOptions(proxyProvider.getProxyOptions(address));
+                NetClient theClient = vertx.createNetClient(options);
+                theClient.connect(address, ar -> {
+                    if (ar.succeeded()) {
+                        NetSocket socketToRemote = ar.result();
+                        sendSuccessAndBuildTrafficForwarding(socket, socketToRemote, method);
+                    } else {
+                        log.debug(ar.cause().getMessage(), ar.cause());
+                        sendError(socket, NETWORK_UNREACHABLE, method);
+                    }
+                });
+            } else {
+                client.connect(address, ar -> {
+                    if (ar.succeeded()) {
+                        NetSocket socketToRemote = ar.result();
+                        sendSuccessAndBuildTrafficForwarding(socket, socketToRemote, method);
+                    } else {
+                        log.debug(ar.cause().getMessage(), ar.cause());
+                        sendError(socket, NETWORK_UNREACHABLE, method);
+                    }
+                });
+            }
         }
     }
 
@@ -838,5 +858,10 @@ public class Socks5Server {
     @FunctionalInterface
     private interface Socks5AuthMethod {
         void onAuth(NetSocket socket, AuthSuccessCallback successCallback, Runnable failedCallback);
+    }
+
+    @FunctionalInterface
+    public interface ProxyProvider {
+        ProxyOptions getProxyOptions(SocketAddress target);
     }
 }
