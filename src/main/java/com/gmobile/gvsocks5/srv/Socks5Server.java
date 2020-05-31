@@ -594,18 +594,7 @@ public class Socks5Server {
         } else {
             log.info("Target Address: " + address);
             if(proxyProvider != null) {
-                NetClientOptions options = new NetClientOptions();
-                options.setProxyOptions(proxyProvider.getProxyOptions(socket.remoteAddress()));
-                NetClient theClient = vertx.createNetClient(options);
-                theClient.connect(address, ar -> {
-                    if (ar.succeeded()) {
-                        NetSocket socketToRemote = ar.result();
-                        sendSuccessAndBuildTrafficForwarding(socket, socketToRemote, method);
-                    } else {
-                        log.debug(ar.cause().getMessage(), ar.cause());
-                        sendError(socket, NETWORK_UNREACHABLE, method);
-                    }
-                });
+                proxyProvider.onCustomProxy(socket.remoteAddress(), socketToRemote -> sendSuccessAndBuildTrafficForwarding(socket, socketToRemote, method));
             } else {
                 client.connect(address, ar -> {
                     if (ar.succeeded()) {
@@ -861,7 +850,12 @@ public class Socks5Server {
     }
 
     @FunctionalInterface
+    private interface Socks5ConnectHandler {
+        void onConnect(NetSocket socket);
+    }
+
+    @FunctionalInterface
     public interface ProxyProvider {
-        ProxyOptions getProxyOptions(SocketAddress target);
+        void onCustomProxy(SocketAddress target, Socks5ConnectHandler connectedHandler);
     }
 }
