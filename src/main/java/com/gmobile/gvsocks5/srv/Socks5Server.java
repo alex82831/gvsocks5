@@ -850,7 +850,7 @@ public class Socks5Server {
     }
 
     @FunctionalInterface
-    private interface Socks5ConnectHandler {
+    public interface Socks5ConnectHandler {
         void onConnect(NetSocket socket);
     }
 
