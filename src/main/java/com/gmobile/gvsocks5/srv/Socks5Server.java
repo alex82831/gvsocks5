@@ -594,7 +594,7 @@ public class Socks5Server {
         } else {
             log.info("Target Address: " + address);
             if(proxyProvider != null) {
-                proxyProvider.onCustomProxy(socket.remoteAddress(), socketToRemote -> sendSuccessAndBuildTrafficForwarding(socket, socketToRemote, method));
+                proxyProvider.onCustomProxy(socket.remoteAddress(), address, socketToRemote -> sendSuccessAndBuildTrafficForwarding(socket, socketToRemote, method));
             } else {
                 client.connect(address, ar -> {
                     if (ar.succeeded()) {
@@ -856,6 +856,6 @@ public class Socks5Server {
 
     @FunctionalInterface
     public interface ProxyProvider {
-        void onCustomProxy(SocketAddress target, Socks5ConnectHandler connectedHandler);
+        void onCustomProxy(SocketAddress remoteAddrrss, SocketAddress target, Socks5ConnectHandler connectedHandler);
     }
 }
